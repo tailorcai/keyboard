@@ -4,3 +4,5 @@ build/*
 !build/d.sh
 !build/bd.sh
 .vscode/
+.cache/
+.devcontainer/
