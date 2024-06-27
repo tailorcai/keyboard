@@ -24,7 +24,9 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <pico/printf.h>
 #include <string.h>
+#include "class/cdc/cdc_device.h"
 #include "class/hid/hid.h"
 #include "pico/stdio.h"
 #include "pico/stdlib.h"
@@ -85,26 +87,14 @@ void core1_main() {
 
 void my_host_task();
 void control_task();
-
+void cdc_task(void);
 /*------------- MAIN -------------*/
 int main(void)
 {
-  // using uart for debug log output
-  stdio_uart_init_full(uart1, PICO_DEFAULT_UART_BAUD_RATE, 4, 5);
-
-  printf("starting\n");
-
-  // board_init(); don't do this
+  board_init();
   tusb_init();
-
-  printf("read data...");
-  stdio_flush();
+  // delay
   str_tbl = persist_readBackMyData();
-  // for( int i=0;i<6;i++) {
-  //   printf("DBG: %x,%s\n", str_tbl[i].ch, str_tbl[i].data);
-  // }
-  printf("done!\n");
-  stdio_flush();
 
   // multicore_reset_core1();
   // // all USB task run in core1
@@ -114,6 +104,7 @@ int main(void)
   //set_sys_clock_khz(200000, true);
   // keyboard_init();
   led_init();
+  led_solid(false);
     
   CreateQueue(&q_send, 64);
   int n = 0;
@@ -125,62 +116,119 @@ int main(void)
     led_task();
     control_task();
     pio_usb_host_task();
+    // cdc_task();
   }
 
   return 0;
 }
 
 
+int cdc__printf (const char *format, ...)
+{
+   va_list arg;
+   int done;
+
+   va_start (arg, format);
+   char buf[1024];
+   done = vsnprintf (buf, sizeof(buf), format, arg);
+   va_end (arg);
+
+   int i=0; 
+   while(i<done) {
+    int n = done-i>64?64:done-i;
+    tud_cdc_write( &buf[i], n );
+    tud_cdc_write_flush();
+    sleep_ms(10);
+    i+= n;
+   }
+   return done;
+}
+
+void dbg_dump(const char* buf, int len) {
+  for( int i=0;;i++) {
+    if( i>=len || len == -1 && buf[i]==0 )
+      break;
+    cdc__printf("0x%02x ", buf[i]);
+  }
+  cdc__printf("\n");
+}
+
 void control_task() {
   static char buf[1024] = {0};
   static int len = 0;
   if( len > 1000) {
     // error, reset
-    printf("line overflow, reset!\n");
+    // printf("line overflow, reset!\n");
     len = 0;
   }
 
-  int c=getchar_timeout_us(0);
-  if ( c == PICO_ERROR_TIMEOUT ) return;
-
-  buf[len++] = (char) c&0xFF;
+  if (!tud_cdc_available()) return;
+  char c;
+  uint32_t count = tud_cdc_read(&c, 1);
+  if( !count ) return;
+  // int c=getchar_timeout_us(0);
+  // if ( c == PICO_ERROR_TIMEOUT ) return;
+  
+  buf[len++] = c;
   buf[len] = 0;
-  if( c != 0x0) return;
-  printf("DBG: stdin read %s\n", buf);
+  if( c != '\n') return;
+
+  dbg_dump("DBG: stdin read ",-1);dbg_dump(buf, len);
   // byte: id    0x59 -> 0x5e
   // byte: 
+  KEY_STRING *p = str_tbl;
+  bool saved = false;
   switch(buf[0]) {
-    case 3:
-    case 1: {
-      KEY_STRING *p = str_tbl;
+    case '?':
+      cdc__printf("input:[CMD] [ID] [DATA...]\n");
+      cdc__printf("CMD: a=add,c=clear all,s=show\n");
+      cdc__printf("ID:1-9\nDATA:text\n");
+      break;
+    case 's':
+    case 'S': 
       for( int i=0;i<6;i++, p++) {
-        if(buf[0] == 3 && p->ch) {
-          printf("%x,%s\n", p->ch, p->data);
-        }
-        if(buf[0] == 1) p->ch = 0;
+        if( p->ch )
+          cdc__printf("%x,%s\n", p->ch, p->data);
       }
       break;
-    }
 
-    case 2: {
-      KEY_STRING *p = str_tbl;
+    case 'c':
+    case 'C': 
       for( int i=0;i<6;i++, p++) {
-        if( p->ch == buf[1] || p->ch == 0) {
-          p->ch = buf[1];
-          strncpy(p->data,buf+2, 64);
+        p->ch = 0;
+      }
+      saved = true;
+      break;
+
+    case 'a': 
+    case 'A': {
+      int ch = buf[2] - '1' + 0x59;   // my code START from 0x59
+      for( int i=0;i<6;i++, p++) {        
+        
+        if( p->ch == ch || p->ch == 0) {
+          p->ch = ch;
+          strncpy(p->data,buf+4, len-5);
+          p++;
+          for( int j=i+1;j<6;j++,p++)
+            if(p->ch == ch) p->ch = 0;
           break;
         }
       }
+      saved = true;
       break;
     }
-
+    default:
+      cdc__printf("unknown cmd %c\n", buf[0]);
+      return;
   }
   
   len = 0;
-  // printf("table overflow, reset!\n");
-  printf(" persist save\n");
-  persist_saveMyData();
-  printf(" persist done\n");
+  if( saved ) {
+    // printf("table overflow, reset!\n");
+    // cdc__printf(" persist save\n");
+    persist_saveMyData();
+    cdc__printf(" persist done\n");
+  }
 }
 
 uint8_t const conv_table[128][2] =  { HID_ASCII_TO_KEYCODE };
@@ -224,22 +272,22 @@ void my_host_task() {
             for( int i=0;i<6;i++,keystr++) {
               // for ascii 
               if( temp[3] == keystr->ch) {
-                printf("found %s\n", keystr->data);
+                cdc__printf("found %s\n", keystr->data);
                 for( uint8_t* p = keystr->data;*p!=0;p++) {
                   MY_KEY keycode = translate_ascii(*p);
                   if( keycode.type != KEY_TYPE_NONE ) {
-                    printf("%02x,%02x,%02x\n", keycode.type, keycode.modifier, keycode.code );
+                    cdc__printf("%02x,%02x,%02x\n", keycode.type, keycode.modifier, keycode.code );
                     Enqueue(&q_send, keycode);
                     MY_KEY key_type_release = {KEY_TYPE_RELEASE};
                     Enqueue(&q_send, key_type_release);
                   }
                 }
-                printf("\n");
+                cdc__printf("\n");
               }
             }
               // for 
             if( temp[3] == 0x5c) {
-              printf("0x5c found\n");
+              cdc__printf("0x5c found\n");
               MY_KEY keys[] = {
                     { KEY_TYPE_NORMAL, 3, 0 },  // CTRL+SHIFT DOWN
                     { KEY_TYPE_MEDIA, 0, 0xb8}, // EJECT
@@ -272,12 +320,12 @@ void my_host_task() {
           // }
         #if 1
           if (len > 0) {
-            printf( "%04x:%04x EP 0x%02x:\t", device->vid, device->pid,
+            cdc__printf( "%04x:%04x EP 0x%02x:\t", device->vid, device->pid,
                    ep->ep_num);
             for (int i = 0; i < len; i++) {
-              printf( "%02x ", temp[i]);
+              cdc__printf( "%02x ", temp[i]);
             }
-            printf("\n");
+            cdc__printf("\n");
           }
         #endif 
         }
@@ -291,13 +339,13 @@ void my_host_task() {
 // Invoked when device is mounted
 void tud_mount_cb(void)
 {
-  led_solid(true);
+  // led_solid(true);
 }
 
 // Invoked when device is unmounted
 void tud_umount_cb(void)
 {
-  led_blink(LED_BLINK_NOT_MOUNTED);
+  // led_blink(LED_BLINK_NOT_MOUNTED);
 }
 
 // Invoked when usb bus is suspended
@@ -306,13 +354,13 @@ void tud_umount_cb(void)
 void tud_suspend_cb(bool remote_wakeup_en)
 {
   (void) remote_wakeup_en;
-  led_blink(LED_BLINK_SUSPENDED);
+  // led_blink(LED_BLINK_SUSPENDED);
 }
 
 // Invoked when usb bus is resumed
 void tud_resume_cb(void)
 {
-  led_solid(true);
+  // led_solid(true);
 }
 
 //--------------------------------------------------------------------+
@@ -464,10 +512,10 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_
 
       if (kbd_leds & KEYBOARD_LED_CAPSLOCK) {
         // Capslock On: disable blink, turn led on
-        led_solid(true);
+        // led_solid(true);
       } else {
         // Caplocks Off: back to normal blink
-        led_blink(LED_BLINK_MOUNTED);
+        // led_blink(LED_BLINK_MOUNTED);
       }
     }
   }
@@ -608,3 +656,47 @@ void webserial_task(void)
   }
 }
 */
+
+//--------------------------------------------------------------------+
+// USB CDC
+//--------------------------------------------------------------------+
+void cdc_task(void) {
+  // connected() check for DTR bit
+  // Most but not all terminal client set this when making connection
+  // if ( tud_cdc_connected() )
+  {
+    // connected and there are data available
+    if (tud_cdc_available()) {
+      // read data
+      char buf[64];
+      uint32_t count = tud_cdc_read(buf, sizeof(buf));
+      (void) count;
+
+      // Echo back
+      // Note: Skip echo by commenting out write() and write_flush()
+      // for throughput test e.g
+      //    $ dd if=/dev/zero of=/dev/ttyACM0 count=10000
+      tud_cdc_write(buf, count);
+      tud_cdc_write_flush();
+    }
+  }
+}
+
+// Invoked when cdc when line state changed e.g connected/disconnected
+void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts) {
+  (void) itf;
+  (void) rts;
+
+  // TODO set some indicator
+  if (dtr) {
+    // Terminal connected
+  } else {
+    // Terminal disconnected
+  }
+}
+
+// Invoked when CDC interface received data from host
+void tud_cdc_rx_cb(uint8_t itf) {
+  (void) itf;
+}
+

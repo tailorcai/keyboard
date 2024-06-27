@@ -102,10 +102,12 @@ enum
 {
   ITF_NUM_HID = 0,
   ITF_NUM_VENDOR,
+	ITF_NUM_CDC,        // cdc support
+	ITF_NUM_CDC_DATA,   // 
   ITF_NUM_TOTAL
 };
 
-#define CONFIG_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN + TUD_VENDOR_DESC_LEN)
+#define CONFIG_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN + TUD_VENDOR_DESC_LEN + TUD_CDC_DESC_LEN)
 
 #define EPNUM_HID     0x81
 
@@ -124,7 +126,8 @@ enum
   #define EPNUM_VENDOR_IN  4
   #define EPNUM_VENDOR_OUT 5
 #else
-  #define EPNUM_CDC_IN     2
+  #define EPNUM_CDC_IN     0x82
+  #define EPNUM_CDC_NOTIF  0x83
   #define EPNUM_CDC_OUT    2
   #define EPNUM_VENDOR_IN  3
   #define EPNUM_VENDOR_OUT 3
@@ -145,6 +148,7 @@ uint8_t const desc_configuration[] =
 
   // Interface number, string index, EP notification address and size, EP data address (out, in) and size.
   // TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 4, 0x81, 8, EPNUM_CDC_OUT, 0x80 | EPNUM_CDC_IN, TUD_OPT_HIGH_SPEED ? 512 : 64),
+  TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 4, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, 64)
 };
 
 #if TUD_OPT_HIGH_SPEED

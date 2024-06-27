@@ -25,12 +25,13 @@ set(dir ${CMAKE_CURRENT_LIST_DIR}/src)
 pico_generate_pio_header(${PROJECTNAME} ${dir}/usb_tx.pio)
 pico_generate_pio_header(${PROJECTNAME} ${dir}/usb_rx.pio)
 
-#pico_enable_stdio_usb(${PROJECTNAME} 0)
-#pico_enable_stdio_uart(${PROJECTNAME} 1)
+# pico_enable_stdio_usb(${PROJECTNAME} 1)
+# pico_enable_stdio_uart(${PROJECTNAME} 0)
 #pico_add_extra_outputs(${PROJECTNAME})
 
 target_link_libraries(${PROJECTNAME}
                       pico_stdlib
+                      pico_stdio
                       tinyusb_device
                       tinyusb_board
                       hardware_gpio
