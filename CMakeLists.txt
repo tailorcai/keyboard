@@ -12,6 +12,7 @@ add_executable(${PROJECTNAME}
                save.c
                queue.c
                persist.c
+               kb.c
                src/pio_usb.c
                src/pio_usb_device.c
                src/pio_usb_host.c
@@ -39,7 +40,7 @@ target_link_libraries(${PROJECTNAME}
                       pico_multicore
                       hardware_dma    
                       hardware_pio       
-                    #   tinyusb_host                                 
+                    #   tinyusb_host                                 3111111111Lin
                       )
 
 #TinyUSB stuff so it can pick up tinyusb_config.h

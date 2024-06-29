@@ -42,6 +42,7 @@
 
 #include "queue.h"
 #include "persist.h"
+#include "kb.h"
 
 
 //--------------------------------------------------------------------+
@@ -88,6 +89,8 @@ void core1_main() {
 void my_host_task();
 void control_task();
 void cdc_task(void);
+void process_keycode(uint8_t keycode);
+int cdc__printf (const char *format, ...);
 /*------------- MAIN -------------*/
 int main(void)
 {
@@ -102,7 +105,7 @@ int main(void)
   core1_main(); // multicore will cause flash program lock
 
   //set_sys_clock_khz(200000, true);
-  // keyboard_init();
+  keyboard_init();
   led_init();
   led_solid(false);
     
@@ -116,6 +119,15 @@ int main(void)
     led_task();
     control_task();
     pio_usb_host_task();
+    if( keyboard_update()) {
+      uint8_t* keycodes = get_keycode_report();
+      for (int i = 0; i < KEYBOARD_REPORT_SIZE; i++) {
+        cdc__printf( "%02x ", keycodes[i]);
+      }
+      cdc__printf("\n");
+
+      process_keycode( keycodes[0]);
+    }
     // cdc_task();
   }
 
@@ -146,7 +158,7 @@ int cdc__printf (const char *format, ...)
 
 void dbg_dump(const char* buf, int len) {
   for( int i=0;;i++) {
-    if( i>=len || len == -1 && buf[i]==0 )
+    if( len!=-1 && i>=len || len==-1 && buf[i]==0 )
       break;
     cdc__printf("0x%02x ", buf[i]);
   }
@@ -171,9 +183,13 @@ void control_task() {
   
   buf[len++] = c;
   buf[len] = 0;
-  if( c != '\n') return;
+  if( c != '\n' && c != '\r') return;
+  if( len == 1 ) {
+    len = 0;
+    return;
+  }
 
-  dbg_dump("DBG: stdin read ",-1);dbg_dump(buf, len);
+  // dbg_dump("DBG: stdin read ",-1);dbg_dump(buf, len);
   // byte: id    0x59 -> 0x5e
   // byte: 
   KEY_STRING *p = str_tbl;
@@ -189,6 +205,8 @@ void control_task() {
       for( int i=0;i<6;i++, p++) {
         if( p->ch )
           cdc__printf("%x,%s\n", p->ch, p->data);
+        else
+          cdc__printf("empty\n");
       }
       break;
 
@@ -207,7 +225,25 @@ void control_task() {
         
         if( p->ch == ch || p->ch == 0) {
           p->ch = ch;
-          strncpy(p->data,buf+4, len-5);
+          uint8_t* ptr = buf+4;
+          uint8_t* dst = p->data;
+          int j=len-5;
+          while( j ) {
+            uint8_t c = *ptr;
+            cdc__printf("%d-%02x ", j, c);
+            if( c == '\\') {
+              ptr++;j--;
+              c = *ptr;
+              if( c == 'n')
+                c = '\n';
+            }
+            *dst = c;
+            dst++;
+            ptr++;
+            j--;
+          }
+          *dst = 0;
+          // strncpy(p->data,buf+4, len-5);
           p++;
           for( int j=i+1;j<6;j++,p++)
             if(p->ch == ch) p->ch = 0;
@@ -245,6 +281,61 @@ MY_KEY translate_ascii(uint8_t in) {
   return empty;
 }
 
+void process_keycode(uint8_t keycode) {
+  switch(keycode) {
+    case 0x59:
+    case 0x5a:
+    case 0x5b:
+    case 0x5d:
+    case 0x5e: {
+        KEY_STRING *keystr = str_tbl;
+        for( int i=0;i<6;i++,keystr++) {
+          // for ascii 
+          if( keycode == keystr->ch) {
+            cdc__printf("found %s\n", keystr->data);
+            for( uint8_t* p = keystr->data;*p!=0;p++) {
+              MY_KEY keycode = translate_ascii(*p);
+              if( keycode.type != KEY_TYPE_NONE ) {
+                cdc__printf("%02x,%02x,%02x\n", keycode.type, keycode.modifier, keycode.code );
+                Enqueue(&q_send, keycode);
+                MY_KEY key_type_release = {KEY_TYPE_RELEASE};
+                Enqueue(&q_send, key_type_release);
+              }
+            }
+            cdc__printf("\n");
+          }
+        }
+        break;
+    }
+    case 0x5c: {
+      cdc__printf("0x5c found\n");
+      MY_KEY keys[] = {
+            { KEY_TYPE_NORMAL, 3, 0 },  // CTRL+SHIFT DOWN
+            { KEY_TYPE_MEDIA, 0, 0xb8}, // EJECT
+            { KEY_TYPE_MEDIA, 0, 0x0},
+            { KEY_TYPE_RELEASE},   
+            { KEY_TYPE_NONE}                     
+      };
+      for( int i=0;keys[i].type != KEY_TYPE_NONE;i++) {
+        Enqueue( &q_send, keys[i]);
+      }
+      break;
+    }
+    case 0x5f:
+      Enqueue( &q_send, (MY_KEY) {KEY_TYPE_MEDIA, 0, HID_USAGE_CONSUMER_VOLUME_DECREMENT});
+      Enqueue( &q_send, (MY_KEY){KEY_TYPE_MEDIA, 0, 0});
+      break;
+    case 0x60:
+      Enqueue( &q_send, (MY_KEY){KEY_TYPE_MEDIA, 0, HID_USAGE_CONSUMER_VOLUME_INCREMENT});
+      Enqueue( &q_send, (MY_KEY){KEY_TYPE_MEDIA, 0, 0});
+      break;
+    case 0x61:
+      Enqueue( &q_send, (MY_KEY){KEY_TYPE_MEDIA, 0, HID_USAGE_CONSUMER_PLAY_PAUSE});
+      Enqueue( &q_send, (MY_KEY){KEY_TYPE_MEDIA, 0, 0});
+      break;
+  }  
+}
+
 void my_host_task() {
   if( FullQueue(&q_send))
     return;
@@ -268,37 +359,7 @@ void my_host_task() {
           int len = pio_usb_get_in_data(ep, temp, sizeof(temp));
           if(  (ep->ep_num == 0x81 && len == 9 && temp[0] == 1 && temp[3]))          // normal key
           {
-            KEY_STRING *keystr = str_tbl;
-            for( int i=0;i<6;i++,keystr++) {
-              // for ascii 
-              if( temp[3] == keystr->ch) {
-                cdc__printf("found %s\n", keystr->data);
-                for( uint8_t* p = keystr->data;*p!=0;p++) {
-                  MY_KEY keycode = translate_ascii(*p);
-                  if( keycode.type != KEY_TYPE_NONE ) {
-                    cdc__printf("%02x,%02x,%02x\n", keycode.type, keycode.modifier, keycode.code );
-                    Enqueue(&q_send, keycode);
-                    MY_KEY key_type_release = {KEY_TYPE_RELEASE};
-                    Enqueue(&q_send, key_type_release);
-                  }
-                }
-                cdc__printf("\n");
-              }
-            }
-              // for 
-            if( temp[3] == 0x5c) {
-              cdc__printf("0x5c found\n");
-              MY_KEY keys[] = {
-                    { KEY_TYPE_NORMAL, 3, 0 },  // CTRL+SHIFT DOWN
-                    { KEY_TYPE_MEDIA, 0, 0xb8}, // EJECT
-                    { KEY_TYPE_MEDIA, 0, 0x0},
-                    { KEY_TYPE_RELEASE},   
-                    { KEY_TYPE_NONE}                     
-              };
-              for( int i=0;keys[i].type != KEY_TYPE_NONE;i++) {
-                Enqueue( &q_send, keys[i]);
-              }
-            }
+            process_keycode(temp[3]);
           }
           else if( (ep->ep_num == 0x83 && len == 3 && temp[0] == 2 && temp[1]) ) {      // media key
             switch( temp[1]) {
